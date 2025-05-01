@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+midia/
+api_cache/
+settings.json
