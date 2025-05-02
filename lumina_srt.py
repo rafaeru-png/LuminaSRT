@@ -39,13 +39,20 @@ class LuminaSRTApp:
         style.map('TButton', background=[('active', '#666666')])
 
     def setup_ai_client(self):
-        self.github_token = os.getenv("GITHUB_TOKEN")
-        self.endpoint = "https://models.github.ai/inference"
-        self.model = "openai/gpt-4.1"
-        self.ai_client = ChatCompletionsClient(
-            endpoint=self.endpoint,
-            credential=AzureKeyCredential(self.github_token),
-        )
+        try:
+            self.github_token = os.getenv("GITHUB_TOKEN")
+            if not self.github_token:
+                raise ValueError("O token GITHUB_TOKEN não foi encontrado. Verifique o arquivo .env.")
+            
+            self.endpoint = "https://models.github.ai/inference"
+            self.model = "openai/gpt-4.1"
+            self.ai_client = ChatCompletionsClient(
+                endpoint=self.endpoint,
+                credential=AzureKeyCredential(self.github_token),
+            )
+            self.log("Cliente da IA configurado com sucesso.")
+        except Exception as e:
+            self.log(f"Erro ao configurar o cliente da IA: {str(e)}")
 
     def setup_apis(self):
         self.api_config = {
@@ -228,6 +235,7 @@ class LuminaSRTApp:
     # Funções de tradução
     def translate_chunk(self, chunk, target_lang):
         try:
+            self.log(f"Enviando solicitação para traduzir o texto para {target_lang}...")
             response = self.ai_client.complete(
                 messages=[
                     SystemMessage("Você é um tradutor profissional."),
@@ -236,16 +244,38 @@ class LuminaSRTApp:
                 temperature=0.7,
                 model=self.model
             )
+            self.log("Tradução recebida com sucesso.")
             return response.choices[0].message.content
         except Exception as e:
             self.log(f"Erro na tradução: {str(e)}")
             return ""
+
+    def test_ai_connection(self):
+        try:
+            self.log("Testando conexão com a API da IA...")
+            response = self.ai_client.complete(
+                messages=[
+                    SystemMessage("Você é um assistente útil."),
+                    UserMessage("Teste de conexão com a API.")
+                ],
+                temperature=0.5,
+                model=self.model
+            )
+            self.log("Conexão com a API da IA bem-sucedida.")
+            return True
+        except Exception as e:
+            self.log(f"Erro ao testar a conexão com a API da IA: {str(e)}")
+            return False
 
     def start_translation(self):
         if not self.lang_var.get():
             messagebox.showerror("Erro", "Selecione um idioma de destino!")
             return
         
+        if not self.test_ai_connection():
+            messagebox.showerror("Erro", "Não foi possível conectar à API da IA. Verifique sua configuração.")
+            return
+
         original_script = self.script_entry.get("1.0", END).strip()
         if not original_script:
             messagebox.showerror("Erro", "Insira um roteiro para traduzir!")
@@ -269,6 +299,12 @@ class LuminaSRTApp:
             self.translated_text.delete(1.0, END)
             self.translated_text.insert(END, self.translated_script)
             self.root.update()
+            
+            # Salvar em arquivo TXT
+            with open("midia/roteiro_traduzido.txt", "a", encoding="utf-8") as f:
+                f.write(translated + "\n\n")
+            
+            time.sleep(2)  # Intervalo entre chamadas
         
         self.translation_in_progress = False
         self.log("Tradução concluída!")
