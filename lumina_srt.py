@@ -3,13 +3,17 @@ import time
 import threading
 import requests
 import json
+import openai
+import pickle
+import io
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from dotenv import load_dotenv
 from tkinter import *
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 from datetime import timedelta
-from azure.ai.inference import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
 
 load_dotenv()
 
@@ -26,6 +30,8 @@ class LuminaSRTApp:
         self.translation_in_progress = False
         
         self.setup_ai_client()
+        # self.setup_gemini_client()
+        self.drive_service = self.setup_drive_service()
         self.setup_apis()
 
     def setup_style(self):
@@ -40,25 +46,35 @@ class LuminaSRTApp:
 
     def setup_ai_client(self):
         try:
-            self.github_token = os.getenv("GITHUB_TOKEN")
-            if not self.github_token:
-                raise ValueError("O token GITHUB_TOKEN não foi encontrado. Verifique o arquivo .env.")
-            
-            self.endpoint = "https://models.github.ai/inference"
-            self.model = "openai/gpt-4.1"
-            self.ai_client = ChatCompletionsClient(
-                endpoint=self.endpoint,
-                credential=AzureKeyCredential(self.github_token),
-            )
-            self.log("Cliente da IA configurado com sucesso.")
+            self.openai_key = os.getenv("OPENAI_API_KEY")
+            if not self.openai_key:
+                raise ValueError("O token OPENAI_API_KEY não foi encontrado. Verifique o arquivo .env.")
+            openai.api_key = self.openai_key
+            self.model = "gpt-3.5-turbo"  # ou "gpt-4" se disponível para você
+            self.log("Cliente da OpenAI configurado com sucesso.")
         except Exception as e:
-            self.log(f"Erro ao configurar o cliente da IA: {str(e)}")
+            self.log(f"Erro ao configurar o cliente da OpenAI: {str(e)}")
+
+    def setup_drive_service(self):
+        SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+        creds = None
+        if os.path.exists('token.pickle'):
+            with open('token.pickle', 'rb') as token:
+                creds = pickle.load(token)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    'credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+        return build('drive', 'v3', credentials=creds)
 
     def setup_apis(self):
         self.api_config = {
-            'pixabay': {'key': os.getenv("PIXABAY_KEY")},
-            'unsplash': {'key': os.getenv("UNSPLASH_KEY")},
-            'pexels': {'key': os.getenv("PEXELS_KEY")}
+            "PEXELS_KEY": os.getenv("PEXELS_KEY")
         }
 
     def create_widgets(self):
@@ -71,9 +87,14 @@ class LuminaSRTApp:
         # Segunda Aba
         tab2 = ttk.Frame(notebook)
         self.create_tab2(tab2)
+
+        # Terceira Aba - Como usar
+        tab3 = ttk.Frame(notebook)
+        self.create_howto_tab(tab3)
         
         notebook.add(tab1, text="Narração e Mídia")
         notebook.add(tab2, text="Tradução")
+        notebook.add(tab3, text="Como usar")
         notebook.pack(expand=1, fill="both")
         
         # Console Log
@@ -105,6 +126,24 @@ class LuminaSRTApp:
         ttk.Button(btn_frame, text="Iniciar Tradução", command=self.start_translation).pack(side=LEFT, padx=5)
         ttk.Button(btn_frame, text="Enviar para Narração", command=self.send_to_tab1).pack(side=LEFT, padx=5)
         btn_frame.pack(pady=10)
+
+    def create_howto_tab(self, tab):
+        instructions = (
+            "Como usar o LuminaSRT:\n\n"
+            "1. Na aba 'Narração e Mídia', carregue ou cole o roteiro original.\n"
+            "2. Clique em 'Gerar SRT e Mídia' para gerar o arquivo SRT e baixar mídias do Google Drive.\n"
+            "3. Na aba 'Tradução', selecione o idioma de destino e clique em 'Iniciar Tradução' para traduzir o roteiro.\n"
+            "4. Após a tradução, clique em 'Enviar para Narração' para transferir o texto traduzido para a aba principal.\n"
+            "5. Acompanhe o progresso e mensagens no console abaixo.\n\n"
+            "Observações:\n"
+            "- As mídias são baixadas do seu Google Drive, conforme as palavras-chave extraídas do roteiro.\n"
+            "- Certifique-se de configurar as chaves de API no arquivo .env antes de usar.\n"
+            "- O arquivo SRT e as mídias baixadas ficam na pasta 'midia/'.\n"
+        )
+        label = scrolledtext.ScrolledText(tab, wrap='word', bg='#333333', fg='white', font=('Arial', 11), height=20)
+        label.insert('1.0', instructions)
+        label.configure(state='disabled')
+        label.pack(fill=BOTH, expand=True, padx=10, pady=10)
 
     def setup_folders(self):
         os.makedirs('midia/imagens', exist_ok=True)
@@ -163,108 +202,106 @@ class LuminaSRTApp:
         return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
     # Funções para download de mídia
-    def download_media(self, keyword):
-        try:
-            self.log(f"Buscando mídia para: {keyword}")
-            self.download_images(keyword)
-            self.download_videos(keyword)
-        except Exception as e:
-            self.log(f"Erro ao baixar mídia: {str(e)}")
-
     def download_images(self, keyword):
-        try:
-            # Pixabay
-            pixabay_url = f"https://pixabay.com/api/?key={self.api_config['pixabay']['key']}&q={keyword}&per_page=3"
-            response = requests.get(pixabay_url)
-            self.save_media(response.json()['hits'], 'imagens', 'webformatURL')
-
-            # Unsplash
-            unsplash_url = f"https://api.unsplash.com/search/photos?query={keyword}&client_id={self.api_config['unsplash']['key']}&per_page=3"
-            response = requests.get(unsplash_url)
-            self.save_media(response.json()['results'], 'imagens', 'urls.regular')
-
-            # Pexels
-            pexels_url = f"https://api.pexels.com/v1/search?query={keyword}&per_page=3"
-            headers = {'Authorization': self.api_config['pexels']['key']}
-            response = requests.get(pexels_url, headers=headers)
-            self.save_media(response.json()['photos'], 'imagens', 'src.medium')
-        except Exception as e:
-            self.log(f"Erro ao baixar imagens: {str(e)}")
+        self.download_from_drive(keyword, 'image')
 
     def download_videos(self, keyword):
+        self.download_from_drive(keyword, 'video')
+
+    def download_from_drive(self, keyword, mime_type_prefix):
         try:
-            # Pixabay Videos
-            pixabay_url = f"https://pixabay.com/api/videos/?key={self.api_config['pixabay']['key']}&q={keyword}&per_page=7"
-            response = requests.get(pixabay_url)
-            self.save_media(response.json()['hits'], 'videos', 'videos.medium.url')
-
-            # Pexels Videos
-            pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&per_page=7"
-            headers = {'Authorization': self.api_config['pexels']['key']}
-            response = requests.get(pexels_url, headers=headers)
-            self.save_media(response.json()['videos'], 'videos', 'video_files[0].link')
-        except Exception as e:
-            self.log(f"Erro ao baixar vídeos: {str(e)}")
-
-    def save_media(self, items, media_type, url_path):
-        for idx, item in enumerate(items):
-            try:
-                url = self.get_nested_value(item, url_path.split('.'))
-                if url:
-                    response = requests.get(url, stream=True)
-                    if response.status_code == 200:
-                        ext = os.path.splitext(url)[1]
-                        filename = f"midia/{media_type}/{time.strftime('%Y%m%d%H%M%S')}_{idx}{ext}"
-                        with open(filename, 'wb') as f:
-                            for chunk in response.iter_content(1024):
-                                f.write(chunk)
-                        self.log(f"Arquivo salvo: {filename}")
-            except Exception as e:
-                self.log(f"Erro ao salvar mídia: {str(e)}")
-
-    def get_nested_value(self, data, keys):
-        for key in keys:
-            if isinstance(data, dict):
-                data = data.get(key, {})
-            elif isinstance(data, list):
-                data = data[int(key)] if len(data) > int(key) else {}
+            # Busca até 3 arquivos no Drive pelo nome e tipo
+            query = f"name contains '{keyword}' and mimeType contains '{mime_type_prefix}/'"
+            results = self.drive_service.files().list(
+                q=query,
+                pageSize=3,
+                fields="files(id, name, mimeType)"
+            ).execute()
+            items = results.get('files', [])
+            if not items:
+                self.log(f"Nenhum arquivo '{mime_type_prefix}' encontrado no Drive para: {keyword}")
+                return
+            # Cria subpasta para a palavra-chave (apenas para vídeos)
+            if mime_type_prefix == 'video':
+                folder_path = os.path.join('midia', 'videos', keyword)
+                os.makedirs(folder_path, exist_ok=True)
             else:
-                return None
-        return data if data else None
+                folder_path = os.path.join('midia', 'imagens')
+                os.makedirs(folder_path, exist_ok=True)
+            for idx, item in enumerate(items):
+                file_id = item['id']
+                file_name = item['name']
+                ext = os.path.splitext(file_name)[1]
+                # Salva na subpasta se for vídeo
+                if mime_type_prefix == 'video':
+                    local_path = os.path.join(folder_path, file_name)
+                else:
+                    local_path = os.path.join(folder_path, file_name)
+                request = self.drive_service.files().get_media(fileId=file_id)
+                fh = io.FileIO(local_path, 'wb')
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                self.log(f"Arquivo baixado do Drive: {local_path}")
+        except Exception as e:
+            self.log(f"Erro ao baixar do Google Drive: {str(e)}")
+
+    def download_media_from_keywords_file(self, filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                keywords = [line.strip() for line in f if line.strip()]
+            for kw in keywords:
+                self.log(f"Baixando mídia para palavra-chave: {kw}")
+                self.download_images(kw)
+                self.download_videos(kw)
+            self.log("Download de mídias concluído para todas as palavras-chave.")
+        except Exception as e:
+            self.log(f"Erro ao baixar mídias do arquivo de palavras-chave: {str(e)}")
 
     # Funções de tradução
     def translate_chunk(self, chunk, target_lang):
         try:
-            self.log(f"Enviando solicitação para traduzir o texto para {target_lang}...")
-            response = self.ai_client.complete(
+            self.log(f"Enviando solicitação para OpenAI traduzir para {target_lang}...")
+            client = openai.OpenAI(api_key=self.openai_key)
+            response = client.chat.completions.create(
+                model=self.model,
                 messages=[
-                    SystemMessage("Você é um tradutor profissional."),
-                    UserMessage(f"Traduza o seguinte texto para {target_lang} mantendo o formato e tom original:\n\n{chunk}")
+                    {"role": "system", "content": (
+                        "Você é um tradutor profissional. Traduza o texto a seguir para o idioma solicitado, "
+                        "mantendo o formato, tom e contexto originais. Não resuma, não corte, não adicione ou remova conteúdo. "
+                        "Garanta que a tradução termine de forma completa, sem reticências ou frases inacabadas."
+                    )},
+                    {"role": "user", "content": f"Traduza o seguinte texto para {target_lang}:\n\n{chunk}"}
                 ],
-                temperature=0.7,
-                model=self.model
+                temperature=0.7
             )
-            self.log("Tradução recebida com sucesso.")
-            return response.choices[0].message.content
+            translated = response.choices[0].message.content.strip()
+            # Remove reticências finais se houver
+            if translated.endswith("..."):
+                translated = translated.rstrip(". ").rstrip()
+            self.log("Tradução recebida da OpenAI com sucesso.")
+            return translated
         except Exception as e:
-            self.log(f"Erro na tradução: {str(e)}")
+            self.log(f"Erro na tradução com OpenAI: {str(e)}")
             return ""
 
     def test_ai_connection(self):
         try:
-            self.log("Testando conexão com a API da IA...")
-            response = self.ai_client.complete(
+            self.log("Testando conexão com a API da OpenAI...")
+            client = openai.OpenAI(api_key=self.openai_key)
+            response = client.chat.completions.create(
+                model=self.model,
                 messages=[
-                    SystemMessage("Você é um assistente útil."),
-                    UserMessage("Teste de conexão com a API.")
+                    {"role": "system", "content": "Você é um assistente útil."},
+                    {"role": "user", "content": "Teste de conexão com a API."}
                 ],
-                temperature=0.5,
-                model=self.model
+                temperature=0.5
             )
-            self.log("Conexão com a API da IA bem-sucedida.")
+            self.log("Conexão com a API da OpenAI bem-sucedida.")
             return True
         except Exception as e:
-            self.log(f"Erro ao testar a conexão com a API da IA: {str(e)}")
+            self.log(f"Erro ao testar a conexão com a API da OpenAI: {str(e)}")
             return False
 
     def start_translation(self):
@@ -287,9 +324,21 @@ class LuminaSRTApp:
         threading.Thread(target=self.translate_script, args=(original_script,)).start()
 
     def translate_script(self, script):
-        chunk_size = 300
-        chunks = [script[i:i+chunk_size] for i in range(0, len(script), chunk_size)]
-        
+        chunk_size = 500  # número máximo de caracteres por bloco
+        words = script.split()
+        chunks = []
+        current_chunk = ""
+
+        for word in words:
+            # +1 para o espaço
+            if len(current_chunk) + len(word) + 1 > chunk_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = word + " "
+            else:
+                current_chunk += word + " "
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
         for i, chunk in enumerate(chunks):
             if not self.translation_in_progress:
                 break
@@ -299,13 +348,13 @@ class LuminaSRTApp:
             self.translated_text.delete(1.0, END)
             self.translated_text.insert(END, self.translated_script)
             self.root.update()
-            
+
             # Salvar em arquivo TXT
             with open("midia/roteiro_traduzido.txt", "a", encoding="utf-8") as f:
                 f.write(translated + "\n\n")
-            
+
             time.sleep(2)  # Intervalo entre chamadas
-        
+
         self.translation_in_progress = False
         self.log("Tradução concluída!")
 
@@ -330,24 +379,41 @@ class LuminaSRTApp:
     def process_srt_and_media(self, script):
         sections = self.generate_srt(script)
         if sections:
-            for idx, section in enumerate(sections):
-                self.log(f"Processando seção {idx+1}/{len(sections)}")
-                keywords = self.get_keywords(section)
-                for kw in keywords:
-                    self.download_media(kw)
+            all_keywords = []
+            with open("midia/palavras_chave.txt", "w", encoding="utf-8") as f:
+                for idx, section in enumerate(sections):
+                    self.log(f"Processando seção {idx+1}/{len(sections)}")
+                    keywords = self.get_keywords(section)
+                    for kw in keywords:
+                        if kw.lower() not in [k.lower() for k in all_keywords]:
+                            all_keywords.append(kw)
+                            f.write(kw + "\n")
+            self.log("Palavras-chave salvas em midia/palavras_chave.txt")
+            self.download_media_from_keywords_file("midia/palavras_chave.txt")
 
     def get_keywords(self, text):
         try:
-            response = self.ai_client.complete(
+            client = openai.OpenAI(api_key=self.openai_key)
+            response = client.chat.completions.create(
+                model=self.model,
                 messages=[
-                    SystemMessage("Você é um assistente de pesquisa de mídia."),
-                    UserMessage(f"Extraia 3 palavras-chave relevantes para buscar vídeos e imagens relacionadas ao texto a seguir. Apenas palavras separadas por vírgula.\n\nTexto: {text}")
+                    {"role": "system", "content": "Você é um assistente de pesquisa de mídia."},
+                    {"role": "user", "content": (
+                        "Extraia 3 palavras-chave únicas, apenas uma palavra cada, sem repetições, "
+                        "e forneça as palavras em português, mesmo que o texto esteja em outro idioma. "
+                        "Use apenas palavras separadas por vírgula, sem frases. Texto:\n\n" + text
+                    )}
                 ],
-                temperature=0.5,
-                model=self.model
+                temperature=0.5
             )
-            keywords = response.choices[0].message.content.split(',')
-            return [kw.strip() for kw in keywords if kw.strip()]
+            # Divide, remove espaços, filtra compostas e remove duplicatas
+            raw_keywords = response.choices[0].message.content.split(',')
+            keywords = []
+            for kw in raw_keywords:
+                kw = kw.strip()
+                if ' ' not in kw and kw and kw.lower() not in [k.lower() for k in keywords]:
+                    keywords.append(kw)
+            return keywords
         except Exception as e:
             self.log(f"Erro ao extrair palavras-chave: {str(e)}")
             return []
